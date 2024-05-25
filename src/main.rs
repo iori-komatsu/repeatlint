@@ -1,6 +1,9 @@
-use std::{collections::HashMap, fs::File, io::Read, ops::Range};
 use std::io::{BufReader, BufWriter, Cursor, Write};
+use std::path::PathBuf;
+use std::{collections::HashMap, fs::File, io::Read, ops::Range};
 
+use serde::Deserialize;
+use structopt::StructOpt;
 use vibrato::{dictionary::WordIdx, Dictionary, Tokenizer};
 
 static HTML_HEAD: &'static str = r#"<!DOCTYPE html>
@@ -44,26 +47,52 @@ static HTML_FOOT: &'static str = r#"
 </html>
 "#;
 
+#[derive(Debug, structopt::StructOpt)]
+struct Opt {
+    #[structopt(name = "INPUT_FILE", parse(from_os_str))]
+    pub input: PathBuf,
+
+    #[structopt(name = "OUTPUT_FILE", short = "o", default_value = "target/result.html", parse(from_os_str))]
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    distance_threshold: usize,
+    proper_nouns: Vec<String>,
+    ignores: Vec<String>,
+}
+
 #[derive(Debug)]
 struct Annotation {
     distance: usize,
 }
 
-fn read_user_dict(user_dict_path: &str) -> anyhow::Result<impl Read> {
-    let mut user_dict = File::open(user_dict_path)?;
+fn read_user_dict(config: &Config) -> anyhow::Result<impl Read> {
     let mut buf = String::new();
-    user_dict.read_to_string(&mut buf)?;
+    for noun in &config.proper_nouns {
+        buf.push_str(&format!("{},1293,1293,0,固有名詞\n", noun));
+    }
     buf.truncate(buf.trim_end().len());
     Ok(BufReader::new(Cursor::new(buf)))
 }
 
 fn main() -> anyhow::Result<()> {
+    let opt = Opt::from_args();
+
+    let config_path = "config.toml";
+    let config: Config = {
+        let mut file = File::open(config_path)?;
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        toml::from_str(&buf)?
+    };
+
     let dict_path = "dict/bccwj-suw+unidic-cwj-3_1_1+compact/system.dic.zst";
-    let user_dict_path = "dict/user.csv";
     let tokenizer = {
         let reader = zstd::Decoder::new(File::open(dict_path)?)?;
         let mut dict = Dictionary::read(reader)?;
-        let user_dict = read_user_dict(user_dict_path)?;
+        let user_dict = read_user_dict(&config)?;
         dict = dict.reset_user_lexicon_from_reader(Some(user_dict))?;
         Tokenizer::new(dict).max_grouping_len(24)
     };
@@ -71,12 +100,12 @@ fn main() -> anyhow::Result<()> {
     let mut worker = tokenizer.new_worker();
 
     let mut text = String::new();
-    File::open("sample.txt")?.read_to_string(&mut text)?;
+    File::open(opt.input)?.read_to_string(&mut text)?;
 
     worker.reset_sentence(text);
     worker.tokenize();
 
-    println!("num_tokens: {}", worker.num_tokens());
+    println!("Tokenized. num_tokens={}", worker.num_tokens());
 
     // 転置インデックス
     let mut index: HashMap<WordIdx, Vec<Range<usize>>> = HashMap::new();
@@ -88,10 +117,8 @@ fn main() -> anyhow::Result<()> {
             Some((pos, _)) => pos,
             None => token.feature(),
         };
-        print!("{}({})", token.surface(), pos);
-        match pos {
-            "空白" | "記号" | "補助記号" | "助詞" | "助動詞" => continue,
-            _ => {}
+        if config.ignores.contains(&pos.to_owned()) {
+            continue;
         }
         index
             .entry(token.word_idx())
@@ -117,30 +144,34 @@ fn main() -> anyhow::Result<()> {
                 }
                 let rj = &ranges[j];
                 let dist = usize::min(
-                    usize::abs_diff(ri.start,rj.end),
+                    usize::abs_diff(ri.start, rj.end),
                     usize::abs_diff(ri.end, rj.start),
                 );
                 min_dist = min_dist.min(dist);
             }
-            annotations.insert(ri.start, Annotation {
-                distance: min_dist,
-            });
+            annotations.insert(ri.start, Annotation { distance: min_dist });
         }
     }
 
-    let html_path = "target/sample.html";
-    let html_file = File::create(html_path)?;
+    // HTMLを出力する
+    let html_path = opt.output;
+    let html_file = File::create(&html_path)?;
     let mut writer = BufWriter::new(html_file);
     write!(writer, "{}", HTML_HEAD)?;
 
     for token in worker.token_iter() {
         let annotation = annotations.get(&token.range_char().start);
-        let class = if annotation.is_some_and(|a| a.distance < 100) {
+        let class = if annotation.is_some_and(|a| a.distance < config.distance_threshold) {
             "alert"
         } else {
             ""
         };
-        write!(writer, "<span title='{}' class='{}'>", html_escape::encode_text(token.feature()), class)?;
+        write!(
+            writer,
+            "<span title='{}' class='{}'>",
+            html_escape::encode_text(token.feature()),
+            class
+        )?;
         write!(writer, "{}", html_escape::encode_text(token.surface()))?;
         write!(writer, "</span>")?;
         write!(writer, "<span class='separator'>|</span>")?;
@@ -150,7 +181,9 @@ fn main() -> anyhow::Result<()> {
     writer.flush()?;
     drop(writer);
 
-    webbrowser::open(html_path)?;
+    println!("Wrote result to '{}'.", html_path.to_string_lossy());
+
+    webbrowser::open(&html_path.to_string_lossy())?;
 
     Ok(())
 }
