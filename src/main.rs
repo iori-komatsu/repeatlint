@@ -2,6 +2,7 @@ use std::io::{BufReader, BufWriter, Cursor, Write};
 use std::path::PathBuf;
 use std::{collections::HashMap, fs::File, io::Read, ops::Range};
 
+use anyhow::{bail, Context};
 use serde::Deserialize;
 use structopt::StructOpt;
 use vibrato::{dictionary::WordIdx, Dictionary, Tokenizer};
@@ -52,8 +53,11 @@ struct Opt {
     #[structopt(name = "INPUT_FILE", parse(from_os_str))]
     pub input: PathBuf,
 
-    #[structopt(name = "OUTPUT_FILE", short = "o", default_value = "target/result.html", parse(from_os_str))]
-    pub output: PathBuf,
+    #[structopt(name = "OUTPUT_FILE", short = "o", parse(from_os_str))]
+    pub output: Option<PathBuf>,
+
+    #[structopt(name = "PROJECT_ROOT", short = "r", parse(from_os_str))]
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,17 +84,28 @@ fn read_user_dict(config: &Config) -> anyhow::Result<impl Read> {
 fn main() -> anyhow::Result<()> {
     let opt = Opt::from_args();
 
-    let config_path = "config.toml";
+    let exe_dir = match opt.project_root {
+        Some(p) => p,
+        None => {
+            let exe_path = std::env::current_exe()?;
+            let Some(exe_dir) = exe_path.parent() else {
+                bail!("failed to get exe directory");
+            };
+            exe_dir.to_owned()
+        },
+    };
+
+    let config_path = exe_dir.join("config.toml");
     let config: Config = {
-        let mut file = File::open(config_path)?;
+        let mut file = File::open(config_path).context("failed to open config")?;
         let mut buf = String::new();
         file.read_to_string(&mut buf)?;
         toml::from_str(&buf)?
     };
 
-    let dict_path = "dict/bccwj-suw+unidic-cwj-3_1_1+compact/system.dic.zst";
+    let dict_path = exe_dir.join("dict/bccwj-suw+unidic-cwj-3_1_1+compact/system.dic.zst");
     let tokenizer = {
-        let reader = zstd::Decoder::new(File::open(dict_path)?)?;
+        let reader = zstd::Decoder::new(File::open(dict_path).context("failed to open dict")?)?;
         let mut dict = Dictionary::read(reader)?;
         let user_dict = read_user_dict(&config)?;
         dict = dict.reset_user_lexicon_from_reader(Some(user_dict))?;
@@ -154,8 +169,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // HTMLを出力する
-    let html_path = opt.output;
-    let html_file = File::create(&html_path)?;
+    let html_path = opt.output.unwrap_or(exe_dir.join("target/result.html"));
+    let html_file = File::create(&html_path).context("failed to open output file")?;
     let mut writer = BufWriter::new(html_file);
     write!(writer, "{}", HTML_HEAD)?;
 
