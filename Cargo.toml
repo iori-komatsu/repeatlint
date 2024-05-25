@@ -1,0 +1,11 @@
+[package]
+name = "repeatlint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+html-escape = "0.2.13"
+vibrato = "0.5.1"
+webbrowser = "1.0.1"
+zstd = "0.13.1"
