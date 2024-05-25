@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <style>
+        body {
+            color: #ddd;
+            background-color: #333;
+            font-size: 16px;
+            line-height: 28px;
+            max-width: 584px; /* 16px * 35 + 12px * 2 */
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .novel-body {
+            white-space: pre-wrap;
+            line-break: strict;
+            padding-left: 12px;
+            padding-right: 12px;
+            font-family: '游明朝',YuMincho,'ヒラギノ明朝 Pr6N','Hiragino Mincho Pr6N','ヒラギノ明朝 ProN','Hiragino Mincho ProN','ヒラギノ明朝 StdN','Hiragino Mincho StdN',HiraMinProN-W3,'HGS明朝B','HG明朝B','Helvetica Neue',Helvetica,Arial,'ヒラギノ角ゴ Pr6N','Hiragino Kaku Gothic Pr6N','ヒラギノ角ゴ ProN','Hiragino Kaku Gothic ProN','ヒラギノ角ゴ StdN','Hiragino Kaku Gothic StdN','Segoe UI',Verdana,'メイリオ',Meiryo,sans-serif;
+        }
+        .separator {
+            color: #444;
+        }
+        .alert {
+            background-color: #933;
+        }
+        #input {
+          width: 100%;
+          box-sizing: border-box;
+        }
+        #submit-button {
+          width: 100%; /* ボタンの横幅を親要素の横幅100%に設定 */
+          background-color: #4CAF50; /* 緑色 (#4CAF50) を背景色に設定 */
+          color: white; /* 文字色を白に設定 */
+          border: none; /* 境界線をなしに設定 */
+          padding: 10px 20px; /* ボタンの上下左右に余白を設定 */
+          font-size: 16px; /* フォントサイズを16pxに設定 */
+          cursor: pointer; /* カーソルをポインタに変更 */
+          margin-bottom: 8px;
+        }
+    </style>
+  </head>
+  <body>
+    <form>
+      <textarea id="input" name="input" rows="25" placeholder="ここにテキストを入力してね"></textarea>
+      <input id="submit-button" type="button" value="実行！ (Ctrl+Enter)">
+      <div id="result">ここに結果が表示されます。</div>
+    </form>
+    <script>
+      // access the pre-bundled global API functions
+      const { invoke } = window.__TAURI__.tauri;
+
+      document.getElementById('submit-button').addEventListener('click', (event) => {
+        const button = document.getElementById('submit-button');
+        const input = document.getElementById('input').value;
+        console.log("len(input) = ", input.length);
+        button.value = "実行中……";
+        button.disabled = true;
+        invoke('repeatlint', { input: input }).then((response) => {
+          console.log("len(response) = ", response.length);
+          document.getElementById('result').innerHTML = response;
+        }).catch((error) => {
+          alert(error);
+        }).finally(() => {
+          button.value = "実行！ (Ctrl+Enter)";
+          button.disabled = false;
+        });
+      });
+
+      document.addEventListener('keydown', (event) => {
+        if (event.ctrlKey && event.keyCode == 13) {
+          document.getElementById('submit-button').click();
+        }
+      })
+    </script>
+  </body>
+</html>

@@ -1,66 +1,19 @@
+use std::cell::OnceCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufReader, BufWriter, Cursor, Write};
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Mutex;
 use std::{collections::HashMap, fs::File, io::Read, ops::Range};
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
-use structopt::StructOpt;
 use vibrato::{dictionary::WordIdx, Dictionary, Tokenizer};
 
-static HTML_HEAD: &'static str = r#"<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body {
-            color: #ddd;
-            background-color: #333;
-            font-size: 16px;
-            line-height: 28px;
-            max-width: 584px; /* 16px * 35 + 12px * 2 */
-            margin-left: auto;
-            margin-right: auto;
-        }
-        .novel-body {
-            white-space: pre-wrap;
-            line-break: strict;
-            padding-left: 12px;
-            padding-right: 12px;
-            font-family: '游明朝',YuMincho,'ヒラギノ明朝 Pr6N','Hiragino Mincho Pr6N','ヒラギノ明朝 ProN','Hiragino Mincho ProN','ヒラギノ明朝 StdN','Hiragino Mincho StdN',HiraMinProN-W3,'HGS明朝B','HG明朝B','Helvetica Neue',Helvetica,Arial,'ヒラギノ角ゴ Pr6N','Hiragino Kaku Gothic Pr6N','ヒラギノ角ゴ ProN','Hiragino Kaku Gothic ProN','ヒラギノ角ゴ StdN','Hiragino Kaku Gothic StdN','Segoe UI',Verdana,'メイリオ',Meiryo,sans-serif;
-        }
-        .separator {
-            color: #444;
-        }
-        .alert {
-            background-color: #933;
-        }
-    </style>
-</head>
-<body>
+static HTML_HEAD: &'static str = r#"<div class="novel-body">"#;
 
-<div class="novel-body">
-"#;
+static HTML_FOOT: &'static str = r#"</div>"#;
 
-static HTML_FOOT: &'static str = r#"
-</div>
-</body>
-</html>
-"#;
-
-#[derive(Debug, structopt::StructOpt)]
-struct Opt {
-    #[structopt(name = "INPUT_FILE", parse(from_os_str))]
-    pub input: PathBuf,
-
-    #[structopt(name = "OUTPUT_FILE", short = "o", parse(from_os_str))]
-    pub output: Option<PathBuf>,
-
-    #[structopt(name = "PROJECT_ROOT", short = "r", parse(from_os_str))]
-    pub project_root: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Hash)]
 struct Config {
     distance_threshold: usize,
     proper_nouns: Vec<String>,
@@ -81,43 +34,73 @@ fn read_user_dict(config: &Config) -> anyhow::Result<impl Read> {
     Ok(BufReader::new(Cursor::new(buf)))
 }
 
-fn main() -> anyhow::Result<()> {
-    let opt = Opt::from_args();
+fn create_tokenizer(exe_dir: &Path, config: &Config) -> anyhow::Result<Tokenizer> {
+    let dict_path = exe_dir.join("dict/bccwj-suw+unidic-cwj-3_1_1+compact/system.dic.zst");
+    let reader = zstd::Decoder::new(File::open(&dict_path).with_context(|| {
+        format!(
+            "辞書ファイル({})を開けませんでした。",
+            dict_path.to_string_lossy()
+        )
+    })?)?;
+    let mut dict = Dictionary::read(reader)?;
+    let user_dict = read_user_dict(config)?;
+    dict = dict.reset_user_lexicon_from_reader(Some(user_dict))?;
+    let tokenizer = Tokenizer::new(dict).max_grouping_len(24);
+    Ok(tokenizer)
+}
 
-    let exe_dir = match opt.project_root {
-        Some(p) => p,
+fn calculate_hash<T: Hash>(t: &T) -> u64 {
+    let mut s = DefaultHasher::new();
+    t.hash(&mut s);
+    s.finish()
+}
+
+pub fn lint(input: &str, project_root: Option<&Path>) -> anyhow::Result<String> {
+    let exe_dir = match project_root {
+        Some(p) => p.to_owned(),
         None => {
             let exe_path = std::env::current_exe()?;
             let Some(exe_dir) = exe_path.parent() else {
                 bail!("failed to get exe directory");
             };
             exe_dir.to_owned()
-        },
+        }
     };
 
     let config_path = exe_dir.join("config.toml");
     let config: Config = {
-        let mut file = File::open(config_path).context("failed to open config")?;
+        let mut file =
+            File::open(config_path).context("設定ファイル(config.toml)を開けませんでした")?;
         let mut buf = String::new();
         file.read_to_string(&mut buf)?;
         toml::from_str(&buf)?
     };
 
-    let dict_path = exe_dir.join("dict/bccwj-suw+unidic-cwj-3_1_1+compact/system.dic.zst");
-    let tokenizer = {
-        let reader = zstd::Decoder::new(File::open(dict_path).context("failed to open dict")?)?;
-        let mut dict = Dictionary::read(reader)?;
-        let user_dict = read_user_dict(&config)?;
-        dict = dict.reset_user_lexicon_from_reader(Some(user_dict))?;
-        Tokenizer::new(dict).max_grouping_len(24)
+    // tokenizer を毎回作成すると遅いので、キャッシュしておく。
+    // config のハッシュ値が変わったときだけリロードする。
+    static TOKENIZER_CACHE: Mutex<OnceCell<(u64, Tokenizer)>> = Mutex::new(OnceCell::new());
+    let mut tokenizer_cell = TOKENIZER_CACHE.lock().unwrap();
+    let current_hash = calculate_hash(&config);
+    match tokenizer_cell.take() {
+        Some((hash, tokenizer)) if hash == current_hash => {
+            tokenizer_cell
+                .set((hash, tokenizer))
+                .map_err(|_| "set() must succeed")
+                .unwrap();
+        }
+        _ => {
+            let new_tokenizer = create_tokenizer(&exe_dir, &config)?;
+            let new_hash = calculate_hash(&config);
+            tokenizer_cell
+                .set((new_hash, new_tokenizer))
+                .map_err(|_| "set() must succeed")
+                .unwrap();
+        }
     };
-
+    let tokenizer = &tokenizer_cell.get().unwrap().1;
     let mut worker = tokenizer.new_worker();
 
-    let mut text = String::new();
-    File::open(opt.input)?.read_to_string(&mut text)?;
-
-    worker.reset_sentence(text);
+    worker.reset_sentence(input);
     worker.tokenize();
 
     println!("Tokenized. num_tokens={}", worker.num_tokens());
@@ -132,7 +115,7 @@ fn main() -> anyhow::Result<()> {
             Some((pos, _)) => pos,
             None => token.feature(),
         };
-        if config.ignores.contains(&pos.to_owned()) {
+        if config.ignores.iter().any(|s| s == pos) {
             continue;
         }
         index
@@ -169,9 +152,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // HTMLを出力する
-    let html_path = opt.output.unwrap_or(exe_dir.join("target/result.html"));
-    let html_file = File::create(&html_path).context("failed to open output file")?;
-    let mut writer = BufWriter::new(html_file);
+    let mut writer = BufWriter::new(Cursor::new(Vec::new()));
     write!(writer, "{}", HTML_HEAD)?;
 
     for token in worker.token_iter() {
@@ -193,12 +174,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     write!(writer, "{}", HTML_FOOT)?;
-    writer.flush()?;
-    drop(writer);
-
-    println!("Wrote result to '{}'.", html_path.to_string_lossy());
-
-    webbrowser::open(&html_path.to_string_lossy())?;
-
-    Ok(())
+    let html = writer.into_inner()?.into_inner();
+    Ok(String::from_utf8_lossy(&html).to_string())
 }
