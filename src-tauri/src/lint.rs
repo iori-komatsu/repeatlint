@@ -17,7 +17,8 @@ static HTML_FOOT: &'static str = r#"</div>"#;
 struct Config {
     distance_threshold: usize,
     proper_nouns: Vec<String>,
-    ignores: Vec<String>,
+    ignore_pos: Vec<String>,
+    ignore_words: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -115,7 +116,10 @@ pub fn lint(input: &str, project_root: Option<&Path>) -> anyhow::Result<String> 
             Some((pos, _)) => pos,
             None => token.feature(),
         };
-        if config.ignores.iter().any(|s| s == pos) {
+        if config.ignore_pos.iter().any(|s| s == pos) {
+            continue;
+        }
+        if config.ignore_words.iter().any(|w| w == token.surface()) {
             continue;
         }
         index
